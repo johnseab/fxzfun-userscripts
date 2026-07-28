@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME COL Basemap
 // @namespace    https://fxzfun.com/
-// @version      4.0.4
+// @version      4.0.5
 // @description  Adds aerials from the COL GIS as a basemap for WME
 // @author       FXZFun
 // @include      https://beta.waze.com/*
@@ -27,6 +27,7 @@
         date: null,
         dates: [],
         ticket: null,
+        ticketExpiry: null,
         bubbleVisible: true,
         bubblePosition: { top: 40, left: 10 },
         shortcut: null
@@ -41,6 +42,43 @@
         ticketExpiry: State.ticketExpiry
     }));
     const loadState = () => Object.assign(State, JSON.parse(localStorage.getItem(SCRIPT_ID) || '{}'));
+
+    const getTicketExpiry = (ticket) => {
+        if (!ticket) return 0;
+
+        try {
+            const parts = ticket.split('.');
+
+            if (parts.length < 2 || !parts[1]) {
+                throw new Error('Ticket does not contain a JWT payload');
+            }
+
+            const payloadPart = parts[1]
+                .replace(/-/g, '+')
+                .replace(/_/g, '/');
+
+            const paddedPayload = payloadPart.padEnd(
+                payloadPart.length + ((4 - (payloadPart.length % 4)) % 4),
+                '='
+            );
+
+            const payload = JSON.parse(atob(paddedPayload));
+            const expirationSeconds = Number(payload.exp);
+
+            if (!Number.isFinite(expirationSeconds)) {
+                throw new Error('Ticket JWT does not contain a valid expiration value');
+            }
+
+            return expirationSeconds * 1000;
+        } catch (e) {
+            console.error(
+                `${SCRIPT_NAME}: Unable to determine ticket expiration`,
+                e
+            );
+
+            return 0;
+        }
+    };
 
     const API = {
         async fetchJsonAsync(url) {
@@ -61,20 +99,29 @@
             State.ticket = data.ticket;
             State.dates = JSON.parse(data.aerialdates).map(d => d.date.replaceAll('.', ''));
             State.date = State.date || State.dates[0];
-            // ticket expires 2 days after being issued
-            State.ticketExpiry = new Date().getTime() + (2 * (1000 * 60 * 60 * 24));
+            // Use the actual JWT expiration 
+            State.ticketExpiry = getTicketExpiry(State.ticket);
 
             saveState();
         },
 
         async getTicketAsync() {
-            if (!State.ticket) await this.refreshAsync();
+            if (this.shouldRefresh()) await this.refreshAsync();
+
             return State.ticket;
         },
 
         shouldRefresh() {
-            // renew ticket 1 day before expiry
-            return new Date().getTime() >= parseInt(State.ticketExpiry) - (1 * (1000 * 60 * 60 * 24));
+            if (!State.ticket) return true;
+
+            const ticketExpiry = getTicketExpiry(State.ticket);
+            if (!ticketExpiry) return true;
+
+            State.ticketExpiry = ticketExpiry;
+
+            // Refresh five minutes before the actual JWT expiration.
+            const refreshBuffer = 5 * 60 * 1000;
+            return Date.now() >= ticketExpiry - refreshBuffer;
         }
     };
 
